@@ -13,13 +13,13 @@ def coma_inference(env, actors, coma, record_env, num_episodes=10):
     """
     Perform inference using a trained MAPPO model in the given environment.
 
+    :param actors: Actor networks
     :param env: The multi-agent environment.
-    :param mappo: The trained MAPPO instance containing actor networks.
-    :param num_episodes: Number of episodes to run inference.
+    :param coma: The trained COMA instance containing actor networks.
     """
     for episode in range(num_episodes):
         # Reset the environment
-        env_state, global_state, partial_states = env.reset()
+        env_state, communication, global_state, partial_states = env.reset()
         done = False
         episode_reward = 0
         step_count = 0
@@ -35,11 +35,11 @@ def coma_inference(env, actors, coma, record_env, num_episodes=10):
             for agent_id in range(Config.NUM_OF_PLANES):
                 # Get the local state of the agent
                 agent_state = torch.tensor(partial_states[agent_id], dtype=torch.float32).unsqueeze(0)
-
+                global_state_ = torch.tensor(global_state, dtype=torch.float32).unsqueeze(0)
                 agent_action_mask = MultiAgentCOMA.generate_action_mask(partial_states[agent_id])
                 # Select an action using COMA's policy network
                 with torch.no_grad():  # No gradients during action selection
-                    action, action_prob = coma.select_action(agent_state, agent_id, agent_action_mask)
+                    action, action_prob = coma.select_action(agent_state, global_state_, agent_id, agent_action_mask)
 
                 # Convert action to one-hot encoding
                 one_hot_action = np.zeros(Config.NUM_ACTIONS)
@@ -50,7 +50,7 @@ def coma_inference(env, actors, coma, record_env, num_episodes=10):
                 one_hot_actions[agent_id] = one_hot_action
 
             # Step in the environment
-            next_state_representation, next_global_state, next_partial_states, reward, _, done, _ = env.step_inference(
+            next_state_representation, communication, next_global_state, next_partial_states, reward, _, done, _ = env.step_inference(
                 env_state, one_hot_actions
             )
 
@@ -62,6 +62,7 @@ def coma_inference(env, actors, coma, record_env, num_episodes=10):
             # Update the environment state
             env_state = next_state_representation
             partial_states = next_partial_states
+            global_state = next_global_state
 
             time.sleep(0.5)
 
@@ -77,7 +78,7 @@ if __name__ == "__main__":
     coma_agent = MultiAgentCOMA(7, Config.NUM_ACTIONS, Config.NUM_OF_PLANES, Config.HIDDEN_DIM)
 
     for i in range(Config.NUM_OF_PLANES):
-        model = Actor(1, 16, 3, Config.NUM_ACTIONS, grid_number=7, num_heads=8)
+        model = Actor(1, 16, 3, Config.NUM_ACTIONS, grid_number=13, num_heads=8, comm_grid_number=Config.GRID_NUMBER)
         model.load_state_dict(torch.load(f"models/agent_{i}_actor_episode_990.pth", weights_only=True))
         actors[i] = model
     coma_inference(env, actors, coma_agent, record_env)

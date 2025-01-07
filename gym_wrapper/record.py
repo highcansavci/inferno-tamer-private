@@ -29,7 +29,7 @@ if __name__ == '__main__':
     env_ = InfernoTamerGym()
     record_env = VideoRecorder(env_, "random_action.mp4")
     env_.make()
-    state, _, _ = env_.reset()
+    state, _, _, _ = env_.reset()
     env_.screen.draw_game(state)
     record_env.record()
     score = 0
@@ -37,7 +37,7 @@ if __name__ == '__main__':
 
     while not done:
         actions = env_.action_space.sample()
-        next_state_representation, next_state, partial_states, individual_rewards, global_reward, done, _ = env_.step_inference(state, actions)
+        next_state_representation, communication, next_state, partial_states, individual_rewards, global_reward, done, _ = env_.step_inference(state, actions)
         state = next_state_representation
         score += global_reward
         print(f"Score: {score}")

@@ -85,7 +85,7 @@ class Plane:
     def get_type(self):
         return self.type
 
-    def get_partial_state(self, environment, view_radius=3):
+    def get_partial_state(self, environment, view_radius=6):
         """
         Create a partial state centered around the given plane.
         Parameters:
@@ -105,7 +105,7 @@ class Plane:
         col_end = min(self.grid_number, plane_col + view_radius + 1)
 
         # Initialize partial state with zeros
-        partial_state = np.zeros((2 * view_radius + 1, 2 * view_radius + 1))
+        partial_state = np.full((2 * view_radius + 1, 2 * view_radius + 1), -1)
 
         # Fill the partial state with data from the global state
         for row in range(row_start, row_end):
@@ -120,7 +120,9 @@ class Plane:
                     partial_state[local_row][local_col] = 4
                 else:
                     cell = environment[row][col]
-                    if isinstance(cell, Fire):
+                    if cell is None:  # Empty cells or areas with no data
+                        partial_state[local_row][local_col] = 0
+                    elif isinstance(cell, Fire):
                         partial_state[local_row][local_col] = cell.intensity
                     elif isinstance(cell, Plane) and cell != self:  # Avoid marking the current plane
                         partial_state[local_row][local_col] = -1

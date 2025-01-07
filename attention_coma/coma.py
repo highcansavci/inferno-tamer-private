@@ -42,33 +42,42 @@ class ConvWithSelfAttention(nn.Module):
     def __init__(self, input_channels, conv_out_channels, kernel_size, grid_number, num_heads, fc_out_features=128):
         super(ConvWithSelfAttention, self).__init__()
         self.conv1 = nn.Conv2d(input_channels, conv_out_channels, kernel_size=kernel_size, padding=1)
+        self.prelu1 = nn.PReLU()
         self.conv2 = nn.Conv2d(conv_out_channels, conv_out_channels, kernel_size=kernel_size, padding=1)
+        self.prelu2 = nn.PReLU()
         self.pool = nn.MaxPool2d(2, 2)
         self.self_attention = MultiHeadSelfAttention(conv_out_channels, conv_out_channels, num_heads)
+        self.prelu3 = nn.PReLU()
         self.fc = nn.Linear((grid_number // 4) ** 2 * conv_out_channels, fc_out_features)
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
+        x = self.pool(self.prelu1(self.conv1(x)))
+        x = self.pool(self.prelu2(self.conv2(x)))
         batch_size, channels, height, width = x.size()
         x = x.view(batch_size, channels, -1).permute(0, 2, 1)  # Reshape to (batch_size, seq_len, input_dim)
         x = self.self_attention(x)
         x = x.view(batch_size, -1)  # Flatten the output
-        x = F.relu(self.fc(x))
+        x = self.prelu3(self.fc(x))
         return x
 
 
-
 class Actor(nn.Module):
-    def __init__(self, input_channels, conv_out_channels, kernel_size, action_dim, grid_number, num_heads):
+    def __init__(self, input_channels, conv_out_channels, kernel_size, action_dim, grid_number, num_heads, comm_grid_number, hidden_size=128):
         super(Actor, self).__init__()
         self.conv_with_attention = ConvWithSelfAttention(input_channels, conv_out_channels, kernel_size, grid_number,
                                                          num_heads)
-        self.policy_head = nn.Linear(128, action_dim)
+        self.conv_with_attention_comm = ConvWithSelfAttention(input_channels, conv_out_channels, kernel_size,
+                                                              comm_grid_number,
+                                                              num_heads)
+        self.prelu = nn.PReLU()
+        # LSTM layer to introduce recurrence
+        self.policy_head = nn.Linear(256, action_dim)
 
-    def forward(self, x):
+    def forward(self, x, comm):
         x = self.conv_with_attention(x)
-        logits = F.relu(self.policy_head(x))
+        comm = self.conv_with_attention_comm(comm)
+        x = torch.cat((x, comm), dim=1)
+        logits = self.prelu(self.policy_head(x))
         return logits
 
 
@@ -77,13 +86,14 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
         self.conv_with_attention = ConvWithSelfAttention(input_channels, conv_out_channels, kernel_size, grid_number,
                                                          num_heads)
+        self.prelu = nn.PReLU()
         self.fc1 = nn.Linear(128 + action_dim * num_agents, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, 1)
 
-    def forward(self, states, actions):
-        x = self.conv_with_attention(states).squeeze(1)
+    def forward(self, states, actions, hidden_state=None):
+        x = self.conv_with_attention(states)
         x = torch.cat([x, actions.view(actions.size(0), -1)], dim=-1)
-        x = F.relu(self.fc1(x))
+        x = self.prelu(self.fc1(x))
         value = self.fc2(x)
         return value
 
@@ -95,7 +105,7 @@ class MultiAgentCOMA:
         self.gamma = gamma
 
         # Initialize actor and critic for each agent
-        self.actors = nn.ModuleList([Actor(1, 16, 3, action_dim, grid_number=7, num_heads=8) for _ in range(num_agents)])
+        self.actors = nn.ModuleList([Actor(1, 16, 3, action_dim, grid_number=13, num_heads=8, comm_grid_number=Config.GRID_NUMBER) for _ in range(num_agents)])
         self.critic = Critic(1, 16, 3, grid_number=8, num_heads=8, hidden_dim=hidden_dim, action_dim=Config.NUM_ACTIONS, num_agents=Config.NUM_OF_PLANES)
 
         # Optimizers
@@ -137,7 +147,7 @@ class MultiAgentCOMA:
         agent_x, agent_y = agent_position[0]
 
         # Initialize action mask with False (all actions invalid initially)
-        action_mask = [0] * 10
+        action_mask = [0] * Config.NUM_ACTIONS
 
         # Step 1: Check for adjacent fires (Extinguish priority)
         extinguishable = False
@@ -148,9 +158,8 @@ class MultiAgentCOMA:
                     extinguishable = True
                     break
         if extinguishable and agent_refill == -2:
-            # Extinguish action (Index 8) and Noop (Index 9) are valid
+            # Extinguish action (Index 8)
             action_mask[8] = 1
-            action_mask[9] = 1
             return torch.tensor(action_mask, dtype=torch.float32)
 
         # Step 2: Check for refill stacks (Move toward refill priority)
@@ -165,58 +174,73 @@ class MultiAgentCOMA:
             # Allow moves toward all visible refill stacks
             for idx in refill_positions:
                 action_mask[idx] = 1
-            action_mask[9] = 1  # Noop is also valid
             return torch.tensor(action_mask, dtype=torch.float32)
 
-        # Step 3: Validate general movement actions (Empty cells, stacks, and fires)
+        # Step 3: Move toward visible fires (not just adjacent ones)
+        visible_fires = []
         for i, (dx, dy) in enumerate(directions):
-            new_x, new_y = agent_x + dx, agent_y + dy
-            if 0 <= new_x < grid.shape[0] and 0 <= new_y < grid.shape[1]:  # Check bounds
-                cell_value = grid[new_x, new_y]
+            for step in range(1, max(grid.shape)):  # Check progressively outward in this direction
+                new_x, new_y = agent_x + dx * step, agent_y + dy * step
+                if 0 <= new_x < grid.shape[0] and 0 <= new_y < grid.shape[1]:  # Check bounds
+                    cell_value = grid[new_x, new_y]
+                    if cell_value in [1, 2, 3]:  # Fire detected
+                        visible_fires.append((i, step))  # Store direction and distance
+                        break  # Stop looking further in this direction
+                    elif cell_value not in [0, 4]:  # Obstacle blocks visibility
+                        break
 
-                # Prioritize moving towards fires
-                if cell_value in [1, 2, 3]:  # Fire detected in the adjacent cell
-                    action_mask[i] = 1  # Allow movement towards fire
-
-                # Also allow movement to empty cells or stack refill (if no fire is detected)
-                elif 0 <= cell_value <= 4:  # Valid move: empty cell or stack refill
-                    if action_mask[i] == 0:  # If no action has been assigned (no fire), then allow other valid moves
+        # If visible fires exist, move toward the closest one
+        if visible_fires and agent_refill == -2:
+            closest_fire = min(visible_fires, key=lambda x: x[1])  # Find the closest fire by distance
+            action_mask[closest_fire[0]] = 1  # Mark the direction toward the closest fire as valid
+        else:
+            # Allow movement to empty cells or stack refills if no fire is visible
+            for i, (dx, dy) in enumerate(directions):
+                new_x, new_y = agent_x + dx, agent_y + dy
+                if 0 <= new_x < grid.shape[0] and 0 <= new_y < grid.shape[1]:  # Check bounds
+                    cell_value = grid[new_x, new_y]
+                    if cell_value in [0, 4]:  # Valid moves: empty cell or stack refill
                         action_mask[i] = 1
-
-        # Step 4: Noop action (Index 9) is always valid
-        action_mask[9] = 1
 
         return torch.tensor(action_mask, dtype=torch.float32)
 
-    def select_action(self, local_state, agent_id, action_mask=None):
+    def select_action(self, local_state, comm, agent_id, action_mask=None):
         """
-        Select an action using the actor network for the given agent, incorporating action masking.
+        Select an action using the actor network for the given agent, with improved action masking.
 
+        :param comm: Communication matrix.
         :param local_state: Local state of the agent (Tensor).
         :param agent_id: ID of the agent.
         :param action_mask: Optional action mask (1 for valid, 0 for invalid).
         :return: Action and its log probability.
         """
-        logits = self.actors[agent_id](local_state.unsqueeze(0))  # Pass through the actor network
-        logits = F.log_softmax(logits, dim=-1)  # Compute log-probabilities
+        logits = self.actors[agent_id](local_state.unsqueeze(0), comm.unsqueeze(0))  # Pass through the actor network
 
         if action_mask is not None:
-            # Apply action mask by setting invalid actions to a very low value
-            masked_logits = logits + (action_mask + 1e-8).log()
-        else:
-            masked_logits = logits
+            # Ensure the mask matches the shape of logits
+            action_mask = action_mask.unsqueeze(0)  # Add batch dimension to match logits shape
 
-        # Create the distribution and sample
-        dist = Categorical(logits=masked_logits)
+            # Convert action_mask to boolean
+            valid_mask = action_mask.bool()
+
+            # Use logits only for valid actions; mask out invalid actions
+            logits[~valid_mask] = float('-inf')
+
+        # Create a Categorical distribution over the valid logits
+        valid_logits = logits - logits.logsumexp(dim=-1, keepdim=True)  # Re-normalize to avoid NaN issues
+        dist = Categorical(logits=valid_logits)
+
+        # Sample action and compute log-probabilities
         action = dist.sample()
         log_prob = dist.log_prob(action)
 
         return action.item(), log_prob
 
-    def train(self, global_states, local_states, actions, rewards, next_global_states, dones):
+    def train(self, global_states, communications, local_states, actions, rewards, next_global_states, dones):
         """
         Train the COMA model.
 
+        :param communications: Communication matrix.
         :param global_states: Global states (shared among all agents).
         :param local_states: Local states for each agent.
         :param actions: Actions taken by agents.
@@ -232,10 +256,11 @@ class MultiAgentCOMA:
         rewards = torch.tensor(rewards, dtype=torch.float32)
         next_global_states = torch.tensor(next_global_states, dtype=torch.float32)
         dones = torch.tensor(dones, dtype=torch.float32).view(-1, 1)
+        communications = torch.tensor(communications, dtype=torch.float32)
 
         # Centralized critic: Compute Q-values
         with torch.no_grad():
-            next_actions = torch.stack([self.actors[agent](local_states[:, agent, :, :].unsqueeze(1)).argmax(dim=-1)
+            next_actions = torch.stack([self.actors[agent](local_states[:, agent, :, :].unsqueeze(1), global_states.unsqueeze(1)).argmax(dim=-1)
                                         for agent in range(self.num_agents)], dim=1)
             one_hot_next_actions = F.one_hot(next_actions, num_classes=self.action_dim).float()
             target_q_values = self.critic(next_global_states.unsqueeze(1), one_hot_next_actions)
@@ -265,7 +290,7 @@ class MultiAgentCOMA:
             counterfactual_baseline = (q_values_no_action * F.softmax(q_values_no_action, dim=1)).sum(dim=1, keepdim=True)
 
             # Compute actor loss
-            logits = self.actors[agent_id](local_states[:, agent_id, :, :].unsqueeze(1))
+            logits = self.actors[agent_id](local_states[:, agent_id, :, :].unsqueeze(1), global_states.unsqueeze(1))
             dist = Categorical(logits=F.log_softmax(logits, dim=-1))
             log_probs = dist.log_prob(actions[:, agent_id])
             advantages = (q_values - counterfactual_baseline.squeeze(-1)).squeeze(-1)

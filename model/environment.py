@@ -90,7 +90,7 @@ class Environment:
         partial_states = np.stack(partial_states,
                                   axis=0)  # Shape: (num_of_planes, view_radius * 2 + 1, view_radius * 2 + 1)
 
-        return self.environment, self.get_environment_state(), partial_states
+        return self.environment, self.compute_communication_matrix(self.environment), self.get_environment_state(), partial_states
 
     def update_fires(self):
         """Handle fire spread, intensity increase."""
@@ -143,9 +143,6 @@ class Environment:
                         fire = self.environment[target_row][target_col]
                         if isinstance(fire, Fire):
                             plane.extinguish_fire(fire)
-
-            elif action_index == 9:  # Noop
-                pass  # No operation
 
             # Replenish water if at grid edge
             plane.replenish_stack()
@@ -207,7 +204,7 @@ class Environment:
         # Increment the move count
         self.move_count += 1
 
-        return self.environment, next_state, partial_states, individual_rewards, global_reward, done, {}
+        return self.environment, self.compute_communication_matrix(self.environment), next_state, partial_states, individual_rewards, global_reward, done, {}
 
     def calculate_rewards(self, actions_dict):
         """
@@ -305,3 +302,34 @@ class Environment:
 
     def is_within_bounds(self, row, col):
         return 0 <= row < self.grid_number and 0 <= col < self.grid_number
+
+    def compute_communication_matrix(self, environment, view_radius=6):
+        """
+        Compute the communication matrix based on the agents' partial states.
+        Parameters:
+            environment: 2D grid environment
+            view_radius: Radius of visibility for each agent
+        Returns:
+            A 2D communication matrix.
+        """
+        # Initialize a global visibility matrix with -4 (invisible)
+        communication_matrix = np.full((Config.GRID_NUMBER, Config.GRID_NUMBER), -4)
+
+        for plane in self.get_all_planes():
+            # Get the agent's partial state
+            partial_state = plane.get_partial_state(environment, view_radius)
+
+            # Map the partial state back to the global grid
+            plane_row, plane_col = plane.x, plane.y
+            row_start = max(0, plane_row - view_radius)
+            row_end = min(Config.GRID_NUMBER, plane_row + view_radius + 1)
+            col_start = max(0, plane_col - view_radius)
+            col_end = min(Config.GRID_NUMBER, plane_col + view_radius + 1)
+
+            for local_row, row in enumerate(range(row_start, row_end)):
+                for local_col, col in enumerate(range(col_start, col_end)):
+                    if partial_state[local_row][local_col] != 0:
+                        # Update the communication matrix with the visible state
+                        communication_matrix[row][col] = partial_state[local_row][local_col]
+
+        return communication_matrix

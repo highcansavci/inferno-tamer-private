@@ -16,22 +16,22 @@ class Controller:
         self.view = view
 
     def reset(self):
-        environment, state, partial_states = self.model.reset()
+        environment, communication, state, partial_states = self.model.reset()
         self.model.move_count = 0
         self.view.draw_game(environment)
-        return environment, state, partial_states
+        return environment, communication, state, partial_states
 
     def reset_optimized(self):
-        environment, state, partial_states = self.model.reset()
+        environment, communication, state, partial_states = self.model.reset()
         self.model.move_count = 0
-        return environment, state, partial_states
+        return environment, communication, state, partial_states
 
     def step_inference(self, state, actions):
-        next_state_representation, next_state, partial_states, individual_rewards, global_reward, done, _ = self.model.step(state, actions)
+        next_state_representation, communication, next_state, partial_states, individual_rewards, global_reward, done, _ = self.model.step(state, actions)
         self.view.draw_game(next_state_representation)
         self.view.clock.tick(Config.MAX_FPS)
         p.display.flip()
-        return next_state_representation, next_state, partial_states, individual_rewards, global_reward, done, {}
+        return next_state_representation, communication, next_state, partial_states, individual_rewards, global_reward, done, {}
 
     def step(self, state, actions):
         return self.model.step(state, actions)

@@ -107,14 +107,14 @@ if __name__ == '__main__':
     p.init()
     env = InfernoTamerGym()
     env.make()
-    state, _, _ = env.reset()
+    state, _, _, _ = env.reset()
     env.screen.draw_game(state)
     score = 0
     done = False
 
     while not done:
         actions = env.action_space.sample()
-        next_state_representation, next_state, partial_states, individual_rewards, global_reward, done, _ = env.step_inference(state, actions)
+        next_state_representation, communication, next_state, partial_states, individual_rewards, global_reward, done, _ = env.step_inference(state, actions)
         state = next_state_representation
         score += global_reward
         print(f"Score: {score}")

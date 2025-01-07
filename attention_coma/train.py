@@ -91,9 +91,9 @@ def train_coma(env, coma, num_episodes=1000, epsilon=0.1, save_interval=10, mode
         next_global_states = []
         dones = []
         global_states = []
-
+        communications = []
         # Reset environment and retrieve initial state
-        env_state, state, partial_states = env.reset()
+        env_state, communication, state, partial_states = env.reset()
         episode_reward = 0
         episode_length = 0
 
@@ -105,10 +105,11 @@ def train_coma(env, coma, num_episodes=1000, epsilon=0.1, save_interval=10, mode
             for agent_id in range(Config.NUM_OF_PLANES):
                 # Get local state for the agent
                 agent_state = torch.tensor(partial_states[agent_id], dtype=torch.float32).unsqueeze(0)
+                agent_comm = torch.tensor(communication, dtype=torch.float32).unsqueeze(0)
                 agent_action_mask = MultiAgentCOMA.generate_action_mask(partial_states[agent_id])
                 # Select an action using COMA's policy network
                 with torch.no_grad():  # No gradients during action selection
-                    action, action_prob = coma.select_action(agent_state, agent_id, agent_action_mask)
+                    action, action_prob = coma.select_action(agent_state, agent_comm, agent_id, agent_action_mask)
 
                 # Convert action to one-hot encoding
                 one_hot_action = np.zeros(Config.NUM_ACTIONS)
@@ -119,7 +120,7 @@ def train_coma(env, coma, num_episodes=1000, epsilon=0.1, save_interval=10, mode
                 one_hot_actions[agent_id] = one_hot_action
 
             # Perform the environment step
-            next_state_representation, next_state, next_partial_states, individual_reward, global_reward, done, _ = env.step_inference(env_state, one_hot_actions)
+            next_state_representation, next_communication, next_state, next_partial_states, individual_reward, global_reward, done, _ = env.step_inference(env_state, one_hot_actions)
 
             # Update episode metrics
             episode_reward += global_reward
@@ -133,23 +134,25 @@ def train_coma(env, coma, num_episodes=1000, epsilon=0.1, save_interval=10, mode
             dones.append(done)
             next_global_states.append(next_state)
             global_states.append(state)  # Centralized critic uses global state
+            communications.append(communication)
 
             env_state = next_state_representation
             partial_states = next_partial_states
+            communication = next_communication
 
             if done:
                 break
 
         # **Zip and shuffle transitions**
-        transitions = list(zip(partial_states_, actions, next_partial_states_, next_global_states, global_rewards, global_states, dones))
+        transitions = list(zip(partial_states_, actions, next_partial_states_, next_global_states, global_rewards, global_states, dones, communications))
         random.shuffle(transitions)  # Shuffle in place
 
         # **Unzip shuffled transitions**
-        partial_states_, actions, next_partial_states_, next_global_states, global_rewards, global_states, dones = zip(*transitions)
+        partial_states_, actions, next_partial_states_, next_global_states, global_rewards, global_states, dones, communications = zip(*transitions)
 
         # Train the COMA algorithm
         policy_loss, value_loss = coma.train(
-            global_states, partial_states_, actions, global_rewards, next_global_states, dones
+            global_states, communications, partial_states_, actions, global_rewards, next_global_states, dones
         )
 
         # Update tracker with episode and loss metrics

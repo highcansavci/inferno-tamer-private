@@ -81,6 +81,7 @@ def train_ppo_ctde(env, ppo, num_episodes=1000, epsilon=0.1, save_interval=10, m
     for episode in range(num_episodes):
         states = []
         actions = []
+        communications = []
         individual_rewards = []
         global_rewards = []
         next_states = []
@@ -89,7 +90,7 @@ def train_ppo_ctde(env, ppo, num_episodes=1000, epsilon=0.1, save_interval=10, m
         global_states = []
 
         # Reset environment and retrieve initial state
-        env_state, state, partial_states = env.reset()
+        env_state, communication, state, partial_states = env.reset()
         episode_reward = 0
         episode_length = 0
 
@@ -102,27 +103,19 @@ def train_ppo_ctde(env, ppo, num_episodes=1000, epsilon=0.1, save_interval=10, m
             for agent_id in range(Config.NUM_OF_PLANES):
                 # Get local state for the agent
                 agent_state = torch.tensor(partial_states[agent_id], dtype=torch.float32).unsqueeze(0)
-
+                agent_comm = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
                 # Get action probabilities from the target actor
                 with torch.no_grad():  # Ensure no gradients are computed
-                    action_prob = ppo.target_actors[agent_id](agent_state.unsqueeze(0))
-
-                if np.random.rand() < epsilon:  # Add Dirichlet noise
-                    dirichlet_alpha = 0.3  # Dirichlet parameter
-                    dirichlet_noise = np.random.dirichlet([dirichlet_alpha] * Config.NUM_ACTIONS)
-                    noisy_action_prob = action_prob.detach().cpu().numpy() + dirichlet_noise
-                    noisy_action_prob = noisy_action_prob / noisy_action_prob.sum()  # Normalize
-                    action_dist = torch.distributions.Categorical(probs=torch.tensor(noisy_action_prob))
-                    action = action_dist.sample().item()
-                else:
-                    action_dist = torch.distributions.Categorical(probs=action_prob)
+                    action_prob = ppo.target_actors[agent_id](agent_state.unsqueeze(0), agent_comm.unsqueeze(0))
+                    masked_logits = action_prob + (MAPPO.generate_action_mask(partial_states[agent_id]) + 1e-8).log()
+                    action_dist = torch.distributions.Categorical(logits=masked_logits)
                     action = action_dist.sample().item()  # Exploration
 
                 # Compute log probability of the selected action
                 log_prob = torch.log(action_prob[0, action])
 
                 # Convert action to one-hot encoding
-                one_hot_action = np.zeros(action_prob.shape[1])
+                one_hot_action = np.zeros(Config.NUM_ACTIONS)
                 one_hot_action[action] = 1
 
                 # Save action data in the numpy arrays
@@ -131,7 +124,7 @@ def train_ppo_ctde(env, ppo, num_episodes=1000, epsilon=0.1, save_interval=10, m
                 log_probs[agent_id] = log_prob.item()
 
             # Perform the environment step
-            next_state_representation, next_state, next_partial_states, individual_reward, global_reward, done, _ = env.step_inference(env_state, one_hot_actions)
+            next_state_representation, next_communication, next_state, next_partial_states, individual_reward, global_reward, done, _ = env.step_inference(env_state, one_hot_actions)
 
             # Update episode metrics
             episode_reward += global_reward
@@ -146,23 +139,25 @@ def train_ppo_ctde(env, ppo, num_episodes=1000, epsilon=0.1, save_interval=10, m
             dones.append(done)
             old_log_probs.append(log_probs)
             global_states.append(state)  # Centralized critic uses global state
+            communications.append(communication)
 
             env_state = next_state_representation
             partial_states = next_partial_states
+            communication = next_communication
 
             if done:
                 break
 
         # **Zip and shuffle transitions**
-        transitions = list(zip(states, actions, individual_rewards, global_rewards, next_states, dones, old_log_probs, global_states))
+        transitions = list(zip(states, actions, individual_rewards, global_rewards, next_states, dones, old_log_probs, global_states, communications))
         random.shuffle(transitions)  # Shuffle in place
 
         # **Unzip shuffled transitions**
-        states, actions, individual_rewards, global_rewards, next_states, dones, old_log_probs, global_states = zip(*transitions)
+        states, actions, individual_rewards, global_rewards, next_states, dones, old_log_probs, global_states, communications = zip(*transitions)
 
         # Train the PPO algorithm with CTDE approach
         policy_loss, value_loss, entropy_loss = ppo.train(
-            states, actions, individual_rewards, global_rewards, next_states, dones, old_log_probs, global_states
+            states, actions, individual_rewards, global_rewards, next_states, dones, old_log_probs, global_states, communications
         )
 
         # Update tracker with episode and loss metrics
